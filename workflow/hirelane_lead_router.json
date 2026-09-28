@@ -1,0 +1,965 @@
+{
+  "name": "Hirelane Inbound Lead Router",
+  "nodes": [
+    {
+      "parameters": {
+        "eventsUi": {
+          "eventValues": [
+            {
+              "name": "contact.creation"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.hubspotTrigger",
+      "typeVersion": 1,
+      "position": [
+        -800,
+        -64
+      ],
+      "name": "New HubSpot contact",
+      "credentials": {
+        "hubspotDeveloperApi": {
+          "name": "HubSpot Developer account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "get",
+        "contactId": {
+          "__rl": true,
+          "value": "={{ $json.contactId ?? $json.objectId }}",
+          "mode": "id"
+        },
+        "additionalFields": {
+          "propertiesCollection": {
+            "propertiesValues": {
+              "properties": [
+                "website",
+                "email",
+                "firstname",
+                "lastname",
+                "jobtitle",
+                "company",
+                "company_size",
+                "country",
+                "planned_hires",
+                "current_tool",
+                "message"
+              ],
+              "propertyMode": "valueOnly"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        -576,
+        -64
+      ],
+      "name": "Get lead details",
+      "credentials": {
+        "hubspotOAuth2Api": {
+          "name": "HubSpot account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -800,
+        -304
+      ],
+      "name": "Test: run all contacts"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "getAll",
+        "returnAll": true,
+        "additionalFields": {
+          "propertiesCollection": {
+            "propertiesValues": {
+              "properties": [
+                "website",
+                "email",
+                "firstname",
+                "lastname",
+                "jobtitle",
+                "company",
+                "company_size",
+                "country",
+                "planned_hires",
+                "current_tool",
+                "message"
+              ],
+              "propertyMode": "valueOnly"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        -576,
+        -304
+      ],
+      "name": "Get all contacts (test)",
+      "credentials": {
+        "hubspotOAuth2Api": {
+          "name": "HubSpot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Free email providers: leads from these get flagged\nconst FREE_DOMAINS = [\n  'gmail.com', 'googlemail.com', 'gmx.de', 'gmx.net', 'web.de',\n  'yahoo.com', 'yahoo.de', 'outlook.com', 'hotmail.com', 't-online.de', 'icloud.com'\n];\n\n// Dropdown text -> lower number of the band\nconst SIZE_MAP = { '1–49': 1, '50–199': 50, '200–499': 200, '500–999': 500, '1,000–2,000': 1000, '2,000+': 2000 };\nconst HIRES_MAP = { '1–10': 1, '11–50': 11, '51–100': 51, '100+': 100 };\n\n// Turn \"https://www.Site.de/jobs\" into \"site.de\"; \"n/a\" or empty into \"\"\nfunction cleanDomain(website) {\n  const w = (website || '').trim().toLowerCase();\n  if (['', 'n/a', '-'].includes(w)) return '';\n  return w.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0];\n}\n\n// Read a field from flat test data, or from HubSpot's properties.<name>.value\nfunction get(lead, flatName, hubspotName) {\n  return lead[flatName] ?? lead.properties?.[hubspotName]?.value ?? '';\n}\n\nreturn $input.all().map(item => {\n  const lead = item.json;\n\n  // 1-7: read and clean the fields\n  const email = String(get(lead, 'email', 'email')).trim().toLowerCase();\n  const email_domain = email.split('@')[1] || '';\n  const website_domain = cleanDomain(get(lead, 'website', 'website'));\n  const company_size = get(lead, 'company_size', 'company_size');\n  const planned_hires = get(lead, 'planned_hires', 'planned_hires');\n\n  return { json: {\n    hubspot_id: lead.vid ?? '',\n    email,\n    email_domain,\n    website_domain,\n    first_name: String(get(lead, 'first_name', 'firstname')).trim(),\n    last_name: String(get(lead, 'last_name', 'lastname')).trim(),\n    job_title: String(get(lead, 'job_title', 'jobtitle')).trim(),\n    company_name: String(get(lead, 'company_name', 'company')).trim(),\n    country: get(lead, 'country', 'country'),\n    company_size,\n    planned_hires,\n    current_tool: get(lead, 'current_tool', 'current_tool'),\n    message: String(get(lead, 'message', 'message')).replace(/\\s+/g, ' ').trim(),\n\n    // 8-12: yes/no flags and numbers for the rules step\n    is_free_email: FREE_DOMAINS.includes(email_domain),\n    domains_match: email_domain !== '' && email_domain === website_domain,\n    website_missing: website_domain === '',\n    size_min: SIZE_MAP[company_size] || 0,\n    hires_min: HIRES_MAP[planned_hires] || 0\n  }};\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -336,
+        -64
+      ],
+      "name": "clean"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hard rules, checked in order. The first rule that matches wins.\nconst RULES = [\n  {\n    rule_hit: 'spam',\n    fit_tier: 'Disqualified',\n    reason: l => 'Spam or test submission',\n    matches: l => l.email.startsWith('test@') || l.email_domain === 'test.com'\n  },\n  {\n    rule_hit: 'free_email',\n    fit_tier: 'Disqualified',\n    reason: l => `Free email domain (${l.email_domain})`,\n    matches: l => l.is_free_email === true\n  },\n  {\n    rule_hit: 'too_small',\n    fit_tier: 'Disqualified',\n    reason: l => 'Company has fewer than 50 employees',\n    matches: l => l.size_min === 1\n  },\n  {\n    rule_hit: 'outside_region',\n    fit_tier: 'Nurture',\n    reason: l => 'Country outside DACH and Netherlands',\n    matches: l => l.country === 'Other'\n  }\n];\n\nreturn $input.all().map(item => {\n  const lead = item.json;\n  const hit = RULES.find(rule => rule.matches(lead));\n\n  if (hit) {\n    // Lead stopped by a rule\n    return { json: {\n      ...lead,\n      fit_tier: hit.fit_tier,\n      rule_hit: hit.rule_hit,\n      routing_reason: hit.reason(lead),\n      status: 'Filtered'\n    }};\n  }\n\n  // Lead passed all rules and goes on to enrichment\n  return { json: {\n    ...lead,\n    fit_tier: '',\n    rule_hit: 'none',\n    routing_reason: '',\n    status: 'Passed'\n  }};\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        -64
+      ],
+      "name": "hard rules"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "Passed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        144,
+        -64
+      ],
+      "name": "Passed?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -784,
+        304
+      ],
+      "name": "To enrichment"
+    },
+    {
+      "parameters": {
+        "resource": "organization",
+        "domain": "={{ $json.website_domain }}"
+      },
+      "type": "@apolloio/n8n-nodes-apollo.apollo",
+      "typeVersion": 1,
+      "position": [
+        -608,
+        304
+      ],
+      "name": "Apollo enrich",
+      "credentials": {
+        "apolloApi": {
+          "name": "Apollo account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// The lead as it was before the Apollo call\nconst lead = $('Passed?').item.json;\n\n// Apollo's company data (empty if no match)\nconst org = $json.organization || null;\n\n// Upper end of each company size band from the form\nconst SIZE_MAX = { 1: 49, 50: 199, 200: 499, 500: 999, 1000: 2000, 2000: Infinity };\n\nlet enrichment = {\n  enrichment_ok: false,\n  industry: '',\n  employees_apollo: null,\n  funding_stage: '',\n  company_description: '',\n  size_conflict: false,\n  enrichment_note: ''\n};\n\nif (org && org.name) {\n  const employees = org.estimated_num_employees || null;\n  const min = lead.size_min;\n  const max = SIZE_MAX[min];\n\n  // Conflict if Apollo's count is far outside the form's size band (50% tolerance)\n  const conflict = Boolean(employees && min) && (employees < min * 0.5 || employees > max * 1.5);\n\n  enrichment = {\n    enrichment_ok: true,\n    industry: org.industry || '',\n    employees_apollo: employees,\n    funding_stage: org.latest_funding_stage || '',\n    company_description: (org.short_description || '').slice(0, 500),\n    size_conflict: conflict,\n    enrichment_note: 'Matched in Apollo'\n  };\n} else {\n  enrichment.enrichment_note = `No Apollo match for ${lead.website_domain || 'missing website'}`;\n}\n\nreturn { json: { ...lead, ...enrichment, enriched_at: new Date().toISOString() } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        304
+      ],
+      "name": "Merge enrichment"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Score this lead.\n\n<lead>\nJob title: {{ $json.job_title }}\nCompany: {{ $json.company_name }}\nCountry: {{ $json.country }}\nCompany size (form): {{ $json.company_size }}\nPlanned hires (next 12 months): {{ $json.planned_hires }}\nCurrent hiring tool: {{ $json.current_tool }}\nMessage: {{ $json.message }}\n</lead>\n\n<enrichment>\nenrichment_ok: {{ $json.enrichment_ok }}\nIndustry: {{ $json.industry || 'unknown' }}\nEmployees (Apollo): {{ $json.employees_apollo || 'unknown' }}\nFunding stage: {{ $json.funding_stage || 'unknown' }}\nDescription: {{ $json.company_description || 'unknown' }}\nsize_conflict: {{ $json.size_conflict }}\ndomains_match: {{ $json.domains_match }}\n</enrichment>",
+        "options": {
+          "systemMessage": "You are a lead qualification analyst for Hirelane, an ATS and hiring-workflow SaaS for companies that hire in volume.\n\nYour job: score one inbound demo request and return JSON only.\n\n## Ideal customer profile\n- Company size: 200 to 2,000 employees\n- Region: Germany, Austria, Switzerland, Netherlands\n- Industries: logistics, e-commerce, manufacturing, technology, professional services\n- Buyer titles: Head of Talent, Talent Acquisition Lead, HR Director, Head of People, CHRO, or equivalent titles in German or Dutch\n- Strong signals: many planned hires, no ATS or an outdated ATS, recent funding, a stated deadline or budget\n\n## Scoring rubric (score each part, then add them up)\n1. buyer_role (0 to 25): 25 = senior HR or talent leader. 15 = HR manager or C-level non-HR. 10 = influencer such as IT. 5 = junior HR. 0 = no role in buying.\n2. company_fit (0 to 25): 25 = size and industry both match. 15 = one matches. 5 = neither matches but the company is growing fast. 0 = clear mismatch.\n3. hiring_need (0 to 25): 25 = 51 or more planned hires. 18 = 11 to 50. 5 = 1 to 10.\n4. intent (0 to 25): 25 = specific problem, deadline, or budget stated. 15 = clear problem, no timing. 8 = general interest. 0 = vague, off-topic, or doubts the product fits.\n\nfit_score = sum of the four parts.\nTier: A = 75 to 100, B = 50 to 74, C = 25 to 49, Disqualified = 0 to 24.\n\n## Special cases\n- If the person is looking for a job or wants to apply, set is_job_seeker to true.\n- If the company is a staffing agency, recruiting agency, or wants to resell or partner, set is_agency to true.\n- If enrichment_ok is true and size_conflict is true, trust the enrichment employee count over the form.\n- If domains_match is false, do not reduce the score for that alone. Group companies often use a different email domain.\n- Messages may be in German or Dutch. Read them in the original language.\n\n## Output\nReturn only this JSON. No text before or after it. No markdown.\n{\n  \"breakdown\": {\"buyer_role\": 0, \"company_fit\": 0, \"hiring_need\": 0, \"intent\": 0},\n  \"fit_score\": 0,\n  \"tier\": \"A\",\n  \"reasons\": [\"max 3 short reasons, each under 20 words, in English\"],\n  \"is_job_seeker\": false,\n  \"is_agency\": false,\n  \"suggested_opener\": \"One sentence the sales rep can say first. Refer to something specific in the lead's message. Plain and direct, no hype. Write it in the language of the lead's message.\"\n}\n\n## Examples\n\nLead: Head of Talent, 600-person e-commerce company in Germany, 51 to 100 planned hires, no ATS. Message: \"Peak season starts in 8 weeks and we need 70 people. Applications are all in email.\"\nOutput: {\"breakdown\":{\"buyer_role\":25,\"company_fit\":25,\"hiring_need\":25,\"intent\":25},\"fit_score\":100,\"tier\":\"A\",\"reasons\":[\"Senior talent buyer at a mid-size e-commerce company\",\"70 hires planned with no ATS\",\"Hard deadline: peak season in 8 weeks\"],\"is_job_seeker\":false,\"is_agency\":false,\"suggested_opener\":\"With peak season 8 weeks out, let's look at how to get those 70 hires out of email first.\"}\n\nLead: Office Assistant, 120-person law firm in Austria, 1 to 10 planned hires, Personio. Message: \"Just curious what's out there.\"\nOutput: {\"breakdown\":{\"buyer_role\":5,\"company_fit\":5,\"hiring_need\":5,\"intent\":8},\"fit_score\":23,\"tier\":\"Disqualified\",\"reasons\":[\"Junior role with no buying authority\",\"Company below size range and industry outside ICP\",\"Low hiring volume and general interest only\"],\"is_job_seeker\":false,\"is_agency\":false,\"suggested_opener\":\"Thanks for your interest; happy to send a short overview of how Hirelane works.\"}\n\nLead: Marketing Coordinator, 900-person logistics company in the Netherlands, 11 to 50 planned hires, Other ATS. Message: \"I'm interested in joining your team, do you have open marketing roles?\"\nOutput: {\"breakdown\":{\"buyer_role\":0,\"company_fit\":25,\"hiring_need\":18,\"intent\":0},\"fit_score\":43,\"tier\":\"C\",\"reasons\":[\"Person is asking about jobs, not buying\",\"Company fits the ICP but the contact has no buying role\",\"No product interest in the message\"],\"is_job_seeker\":true,\"is_agency\":false,\"suggested_opener\":\"Thanks for reaching out; our open roles are listed on our careers page.\"}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -160,
+        304
+      ],
+      "name": "Score lead (AI)"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-5",
+          "cachedResultName": "Claude Sonnet 5"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        -160,
+        480
+      ],
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Lead data from before the AI Agent\nconst lead = $('Merge enrichment').item.json;\n\n// The AI Agent's answer is in $json.output. Strip any code fences.\nconst text = String($json.output || '')\n  .replace(/```json|```/g, '')\n  .trim();\n\n// Score -> tier bands\nfunction tierFromScore(score) {\n  if (score >= 75) return 'A';\n  if (score >= 50) return 'B';\n  if (score >= 25) return 'C';\n  return 'Disqualified';\n}\n\n// CHECK 1: is the answer valid JSON? If not, send to the SDR for manual review\nlet result;\ntry {\n  result = JSON.parse(text);\n  if (!result.breakdown) throw new Error('No breakdown in AI answer');\n} catch (e) {\n  return { json: {\n    ...lead,\n    scoring_ok: false,\n    fit_score: null,\n    fit_tier: 'B',\n    routing_reason: 'Scoring failed, needs manual review',\n    scored_at: new Date().toISOString()\n  }};\n}\n\n// CHECK 2: recompute the score from the 4 parts, then set the tier from the score\nconst b = result.breakdown || {};\nconst clamp = n => Math.max(0, Math.min(25, Number(n) || 0));\nconst score = clamp(b.buyer_role) + clamp(b.company_fit) + clamp(b.hiring_need) + clamp(b.intent);\nlet tier = tierFromScore(score);\n\nconst notes = [];\nif (score !== result.fit_score) notes.push(`Score corrected from ${result.fit_score} to ${score}`);\nif (tier !== result.tier) notes.push(`Tier corrected from ${result.tier} to ${tier}`);\n\n// CHECK 3: job seekers and agencies are always disqualified\nif (result.is_job_seeker) { tier = 'Disqualified'; notes.push('Override: job seeker'); }\nif (result.is_agency) { tier = 'Disqualified'; notes.push('Override: agency or reseller'); }\n\nconst reasons = (result.reasons || []).slice(0, 3);\n\nreturn { json: {\n  ...lead,\n  scoring_ok: true,\n  fit_score: score,\n  fit_tier: tier,\n  score_breakdown: b,\n  reasons,\n  routing_reason: reasons.join(' | '),\n  is_job_seeker: Boolean(result.is_job_seeker),\n  is_agency: Boolean(result.is_agency),\n  suggested_opener: result.suggested_opener || '',\n  scoring_note: notes.join('; '),\n  scored_at: new Date().toISOString()\n}};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        304
+      ],
+      "name": "Parse + safety checks"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fit_tier }}",
+                    "rightValue": "A",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "AE"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fit_tier }}",
+                    "rightValue": "B",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "SDR"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Nurture"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        432,
+        288
+      ],
+      "name": "Route by tier"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Round-robin between the two AEs\nconst AES = ['Anna (AE)', 'Ben (AE)'];\nconst memory = $getWorkflowStaticData('global');\nconst next = ((memory.lastAE ?? -1) + 1) % AES.length;\nmemory.lastAE = next;\n\nreturn { json: { ...$json, assigned_rep: AES[next] } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        976,
+        272
+      ],
+      "name": "Round-robin AE"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "assigned_rep",
+              "value": "Chris (SDR)",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        976,
+        464
+      ],
+      "name": "set SDR"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "assigned_rep",
+              "value": "Nurture",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        448,
+        64
+      ],
+      "name": "set nurture"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "email": "={{ $json.email }}",
+        "additionalFields": {
+          "customPropertiesUi": {
+            "customPropertiesValues": [
+              {
+                "property": "fit_score",
+                "value": "={{ $json.fit_score }}"
+              },
+              {
+                "property": "fit_tier",
+                "value": "={{ $json.fit_tier }}"
+              },
+              {
+                "property": "assigned_rep",
+                "value": "={{ $json.assigned_rep }}"
+              },
+              {
+                "property": "routing_reason",
+                "value": "={{ $json.routing_reason }}"
+              },
+              {
+                "property": "sla_status",
+                "value": "Pending"
+              },
+              {
+                "property": "hs_lead_status",
+                "value": "NEW"
+              }
+            ]
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        1520,
+        64
+      ],
+      "name": "Update CRM",
+      "credentials": {
+        "hubspotOAuth2Api": {
+          "name": "HubSpot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Read a HubSpot property value, or '' if missing\nconst p = name => $json.properties?.[name]?.value ?? '';\n\n// Who gets alerted (replace with real rep addresses)\nconst REPS = {\n  'Anna (AE)':   'anna@example.com',\n  'Ben (AE)':    'ben@example.com',\n  'Chris (SDR)': 'chris@example.com'\n};\n\n// The opener isn't stored in HubSpot, so take it from the parse node.\n// Leads filtered by the hard rules never went through it, so fall back to ''.\nlet opener = '';\ntry {\n  opener = $('Parse + safety checks').item.json.suggested_opener || '';\n} catch (e) {}\n\nconst rep = p('assigned_rep');\n\nreturn { json: {\n  hubspot_id: $json.vid,\n  email: p('email'),\n  first_name: p('firstname'),\n  last_name: p('lastname'),\n  job_title: p('jobtitle'),\n  company_name: p('company'),\n  fit_tier: p('fit_tier'),\n  fit_score: p('fit_score'),\n  routing_reason: p('routing_reason'),\n  assigned_rep: rep,\n  suggested_opener: opener,\n  rep_email: REPS[rep] || '',\n  alert: Boolean(REPS[rep])   // Nurture has no rep, so no alert\n}};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1744,
+        64
+      ],
+      "name": "Build alert"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1968,
+        64
+      ],
+      "name": "Needs alert?"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.rep_email }}",
+        "subject": "=New Tier {{ $json.fit_tier }} lead: {{ $json.first_name }} {{ $json.last_name }}, {{ $json.company_name }} ({{ $json.fit_score }}/100)",
+        "emailType": "text",
+        "message": "=Hi {{ $json.assigned_rep }},\n\nA new lead was assigned to you.\n\n{{ $json.first_name }} {{ $json.last_name }}, {{ $json.job_title }} at {{ $json.company_name }}\nScore: {{ $json.fit_score }}/100 (Tier {{ $json.fit_tier }})\n\nWhy:\n{{ $json.routing_reason }}\n\nSuggested opener:\n{{ $json.suggested_opener }}\n\nPlease contact them within 15 minutes and update the Lead Status in HubSpot.",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2192,
+        64
+      ],
+      "name": "Alert rep",
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 15,
+        "unit": "minutes"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2416,
+        64
+      ],
+      "name": "Wait (SLA 15 min)"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "get",
+        "contactId": {
+          "__rl": true,
+          "value": "={{ $('Build alert').item.json.hubspot_id }}",
+          "mode": "id"
+        },
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        64
+      ],
+      "name": "Check lead status",
+      "credentials": {
+        "hubspotOAuth2Api": {
+          "name": "HubSpot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.properties.hs_lead_status?.value }}",
+              "rightValue": "NEW",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2864,
+        64
+      ],
+      "name": "Touched?"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "email": "={{ $json['identity-profiles'][0].identities[0].value }}",
+        "additionalFields": {
+          "customPropertiesUi": {
+            "customPropertiesValues": [
+              {
+                "property": "sla_status",
+                "value": "Touched"
+              }
+            ]
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        3088,
+        -32
+      ],
+      "name": "Mark touched",
+      "credentials": {
+        "hubspotOAuth2Api": {
+          "name": "HubSpot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "email": "={{ $json['identity-profiles'][0].identities[0].value }}",
+        "additionalFields": {
+          "customPropertiesUi": {
+            "customPropertiesValues": [
+              {
+                "property": "sla_status",
+                "value": "Escalated"
+              }
+            ]
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        3088,
+        160
+      ],
+      "name": "Mark escalated",
+      "credentials": {
+        "hubspotOAuth2Api": {
+          "name": "HubSpot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "manager@example.com",
+        "subject": "=SLA missed: {{ $('Build alert').item.json.first_name }} {{ $('Build alert').item.json.last_name }} ({{ $('Build alert').item.json.company_name }})",
+        "emailType": "text",
+        "message": "={{ $('Build alert').item.json.assigned_rep }} has not contacted this Tier {{ $('Build alert').item.json.fit_tier }} lead within the SLA. Please follow up or reassign.",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        3312,
+        160
+      ],
+      "name": "Alert manager",
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "New HubSpot contact": {
+      "main": [
+        [
+          {
+            "node": "Get lead details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get lead details": {
+      "main": [
+        [
+          {
+            "node": "clean",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test: run all contacts": {
+      "main": [
+        [
+          {
+            "node": "Get all contacts (test)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get all contacts (test)": {
+      "main": [
+        [
+          {
+            "node": "clean",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "clean": {
+      "main": [
+        [
+          {
+            "node": "hard rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "hard rules": {
+      "main": [
+        [
+          {
+            "node": "Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passed?": {
+      "main": [
+        [
+          {
+            "node": "To enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "set nurture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To enrichment": {
+      "main": [
+        [
+          {
+            "node": "Apollo enrich",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo enrich": {
+      "main": [
+        [
+          {
+            "node": "Merge enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge enrichment": {
+      "main": [
+        [
+          {
+            "node": "Score lead (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Score lead (AI)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score lead (AI)": {
+      "main": [
+        [
+          {
+            "node": "Parse + safety checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse + safety checks": {
+      "main": [
+        [
+          {
+            "node": "Route by tier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by tier": {
+      "main": [
+        [
+          {
+            "node": "Round-robin AE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "set SDR",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "set nurture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Round-robin AE": {
+      "main": [
+        [
+          {
+            "node": "Update CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "set SDR": {
+      "main": [
+        [
+          {
+            "node": "Update CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "set nurture": {
+      "main": [
+        [
+          {
+            "node": "Update CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update CRM": {
+      "main": [
+        [
+          {
+            "node": "Build alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build alert": {
+      "main": [
+        [
+          {
+            "node": "Needs alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs alert?": {
+      "main": [
+        [
+          {
+            "node": "Alert rep",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert rep": {
+      "main": [
+        [
+          {
+            "node": "Wait (SLA 15 min)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait (SLA 15 min)": {
+      "main": [
+        [
+          {
+            "node": "Check lead status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check lead status": {
+      "main": [
+        [
+          {
+            "node": "Touched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Touched?": {
+      "main": [
+        [
+          {
+            "node": "Mark touched",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark escalated",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark escalated": {
+      "main": [
+        [
+          {
+            "node": "Alert manager",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
